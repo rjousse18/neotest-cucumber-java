@@ -92,13 +92,7 @@ To use a local copy in lazy.nvim: `{ dir = "~/path/to/neotest-cucumber-java" }`.
 
 ## License
 
-[MIT with an attribution requirement](LICENSE): free to use, modify and fork, but any project that uses
-or derives from this plugin must credit **neotest-cucumber-java** and its author
-**[rjousse18](https://github.com/rjousse18)** in its README, credits page or NOTICE file.
-Note: because of this extra clause, the license is not the standard OSI-approved MIT.
-
-Suggested credit line:
-
-> Uses [neotest-cucumber-java](https://github.com/rjousse18/neotest-cucumber-java) by rjousse18.
+[MIT](LICENSE): free to use, modify and fork. Keep the copyright notice and license text in copies
+or substantial portions of the code.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) to help out.

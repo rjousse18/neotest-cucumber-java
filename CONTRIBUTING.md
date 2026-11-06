@@ -51,5 +51,4 @@ CI runs the suite on Neovim stable and nightly.
 
 ## License
 
-By contributing, you agree that your contribution is released under the project's [license](LICENSE),
-including its attribution requirement.
+By contributing, you agree that your contribution is released under the project's [MIT license](LICENSE).
