@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="CucumberRunner" tests="5">
+  <testcase name="Plain scenario" classname="x" time="1.0"/>
+  <testcase name="Example #1.1: Validation 01 - happy path" classname="x" time="1.0"/>
+  <testcase name="Example #1.2: Validation 02 - empty input" classname="x" time="1.0">
+    <failure message="expected &lt;ok&gt; but was &lt;ko&gt;" type="java.lang.AssertionError">stack</failure>
+  </testcase>
+  <testcase name="Example #2.1: Other scenario" classname="x" time="0.0">
+    <skipped message="Scenario did not match this scenario filter"/>
+  </testcase>
+  <testcase name="Example #3.1" classname="x" time="1.0"/>
+  <testcase name="Skipped by hook" classname="x" time="0.0"><skipped/></testcase>
+</testsuite>
