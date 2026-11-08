@@ -60,9 +60,16 @@ The `pretty` plugin is what allows live per-scenario status; without it you only
 | `test_dir` | `"src/test"` | Where to look for the runner. |
 | `report_dir` | `"target/surefire-reports"` | Surefire reports location. |
 | `display_names` | `true` | Short names for outline examples. |
+| `debug` | `{ port = 5005, timeout = 300000, dap_config = {} }` | Debugging: JDWP port, ms to wait for Maven to start the JVM, extra fields merged into the nvim-dap attach config. |
 | `live_terminal` | `false` | `true` or `{ height = 15 }`: split streaming Maven output. **Applies to all neotest adapters.** |
 
 `require("neotest-cucumber-java").toggle_terminal()` shows/hides the last terminal.
+
+## Debugging
+
+`require("neotest").run.run({ strategy = "dap" })` runs Maven with `-Dmaven.surefire.debug` (the Surefire JVM waits on port 5005),
+then attaches nvim-dap with a `java` adapter (e.g. [nvim-jdtls](https://github.com/mfussenegger/nvim-jdtls) / java-debug-adapter).
+Set breakpoints before launching; the first launch waits for Maven to compile.
 
 ## How it works
 
@@ -74,7 +81,6 @@ The `pretty` plugin is what allows live per-scenario status; without it you only
 ## Limitations
 
 - Maven only (no Gradle). Unix with `bash` only.
-- No debugging (DAP) support yet.
 - Simplified Gherkin parsing (no `Rule`, limited i18n keywords).
 - Filtering by name: scenarios sharing the same name may all run.
 

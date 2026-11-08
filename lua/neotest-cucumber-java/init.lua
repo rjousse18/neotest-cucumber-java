@@ -15,6 +15,7 @@ local config = require("neotest-cucumber-java.config")
 local parser = require("neotest-cucumber-java.parser")
 local stream = require("neotest-cucumber-java.stream")
 local surefire = require("neotest-cucumber-java.surefire")
+local debug = require("neotest-cucumber-java.debug")
 
 ---@type neotest.Adapter
 local M = { name = "neotest-cucumber-java" }
@@ -163,14 +164,41 @@ function M.build_spec(args)
     end
   end
 
+  local debugging = args.strategy == "dap"
+  if debugging then
+    command[#command + 1] = debug.maven_arg(opts.debug.port)
+  end
+
   surefire.clear(root, runner, opts.report_dir)
   local logfile = vim.fn.tempname()
-  return {
+  local spec = {
     command = stream.wrap_command(command, logfile),
     cwd = root,
     stream = stream.tail(files, logfile),
-    context = { root = root, runner = runner, pos_id = data.id },
+    context = { root = root, runner = runner, pos_id = data.id, logfile = logfile, debug = debugging },
   }
+
+  if debugging then
+    -- neotest does not run `command` with the dap strategy: start Maven ourselves, then attach to the JVM.
+    require("nio").scheduler()
+    local job = vim.fn.jobstart(spec.command, { cwd = root })
+    if job <= 0 then
+      vim.notify("neotest-cucumber-java: could not start Maven", vim.log.levels.ERROR)
+      return nil
+    end
+    vim.notify("neotest-cucumber-java: waiting for Maven to start the JVM (port " .. opts.debug.port .. ")…")
+    local state = debug.wait_for_jvm(logfile, opts.debug.port, opts.debug.timeout)
+    if state ~= "listening" then
+      pcall(vim.fn.jobstop, job)
+      vim.notify(
+        "neotest-cucumber-java: the JVM never waited for a debugger (" .. state .. "); see " .. logfile,
+        vim.log.levels.ERROR
+      )
+      return nil
+    end
+    spec.strategy = debug.attach_config(opts.debug.port, opts.debug.dap_config)
+  end
+  return spec
 end
 
 -- ── Results ──────────────────────────────────────────────────────────────────
@@ -178,6 +206,10 @@ end
 function M.results(spec, result, tree)
   local results = {}
   local ctx = spec.context
+  if ctx.debug then
+    -- the debug session ends with the JVM; Maven still has to write the report
+    debug.wait_for_end(ctx.logfile, 30000)
+  end
   local report, unnamed = surefire.read(ctx.root, ctx.runner, config.options.report_dir)
   if not report then
     results[ctx.pos_id] = {

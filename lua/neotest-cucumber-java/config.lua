@@ -10,6 +10,11 @@
 ---  instead of the full Cucumber scenario name.
 ---@field live_terminal boolean|neotest-cucumber-java.LiveTerminalConfig Open a terminal split that streams the
 ---  Maven output while the tests run. NOTE: this applies to every neotest adapter, not only this one.
+---@field debug neotest-cucumber-java.DebugConfig Debugging (`strategy = "dap"`).
+---@class neotest-cucumber-java.DebugConfig
+---@field port integer JDWP port the Surefire JVM listens on.
+---@field timeout integer Milliseconds to wait for Maven to compile and start the JVM.
+---@field dap_config table Extra fields merged into the nvim-dap attach configuration (e.g. `{ type = "java" }`).
 ---@class neotest-cucumber-java.LiveTerminalConfig
 ---@field height integer Height of the split, in lines.
 
@@ -28,6 +33,7 @@ M.defaults = {
   report_dir = "target/surefire-reports",
   display_names = true,
   live_terminal = false,
+  debug = { port = 5005, timeout = 300000, dap_config = {} },
 }
 
 ---@type neotest-cucumber-java.Config
