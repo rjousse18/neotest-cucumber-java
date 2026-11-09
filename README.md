@@ -60,8 +60,9 @@ The `pretty` plugin is what allows live per-scenario status; without it you only
 | `test_dir` | `"src/test"` | Where to look for the runner. |
 | `report_dir` | `"target/surefire-reports"` | Surefire reports location. |
 | `display_names` | `true` | Short names for outline examples. |
+| `run_mode` | `"each"` | `"each"`: running a feature / outline runs its scenarios and examples one by one (one Maven run each, sequential). `"all"`: a single Maven run for the whole selection. A single example is always runnable on its own (selected by `file:line`). |
 | `debug` | `{ port = 5005, timeout = 300000, dap_config = {} }` | Debugging: JDWP port, ms to wait for Maven to start the JVM, extra fields merged into the nvim-dap attach config. |
-| `live_terminal` | `false` | `true` or `{ height = 15 }`: split streaming Maven output. **Applies to all neotest adapters.** |
+| `live_terminal` | `false` | `true` or `{ height = 15, auto_close = false }`: split streaming Maven output; with `auto_close = true` it closes once all runs are done (reopen with `toggle_terminal()`); use `O` on any example to read its own log. **Applies to all neotest adapters.** |
 
 `require("neotest-cucumber-java").toggle_terminal()` shows/hides the last terminal.
 

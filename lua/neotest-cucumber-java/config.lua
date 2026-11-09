@@ -10,6 +10,8 @@
 ---  instead of the full Cucumber scenario name.
 ---@field live_terminal boolean|neotest-cucumber-java.LiveTerminalConfig Open a terminal split that streams the
 ---  Maven output while the tests run. NOTE: this applies to every neotest adapter, not only this one.
+---@field run_mode "each"|"all" `"each"` (default): running a feature or an outline runs its scenarios / examples
+---  one by one (one Maven run each, results arrive progressively). `"all"`: a single Maven run for the selection.
 ---@field debug neotest-cucumber-java.DebugConfig Debugging (`strategy = "dap"`).
 ---@class neotest-cucumber-java.DebugConfig
 ---@field port integer JDWP port the Surefire JVM listens on.
@@ -33,6 +35,7 @@ M.defaults = {
   report_dir = "target/surefire-reports",
   display_names = true,
   live_terminal = false,
+  run_mode = "each",
   debug = { port = 5005, timeout = 300000, dap_config = {} },
 }
 

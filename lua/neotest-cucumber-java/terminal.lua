@@ -37,10 +37,12 @@ function M.toggle(height)
 end
 
 local installed = false
+local active = 0
 
 ---Wrap neotest's "integrated" strategy. Safe to call several times; call before the first run.
 ---@param height integer
-function M.install(height)
+---@param auto_close? boolean close the split once every run has finished (`toggle` reopens it)
+function M.install(height, auto_close)
   if installed then
     return
   end
@@ -56,19 +58,10 @@ function M.install(height)
     local nio = require("nio")
     local stream = instance.output_stream()
     local channel
+    active = active + 1
 
-    -- Create (or reuse) the window. vim.schedule keeps the calls in order with the data pushes below.
-    vim.schedule(function()
-      local buf = vim.api.nvim_create_buf(false, true)
-      channel = vim.api.nvim_open_term(buf, {})
-      if live and vim.api.nvim_win_is_valid(live.win) then
-        vim.api.nvim_win_set_buf(live.win, buf) -- a new run replaces the previous output
-        live.buf = buf
-      else
-        live = { buf = buf, win = open_split(buf, height) }
-      end
-    end)
-
+    -- The buffer is only created (and shown) once the process prints something: runs queued behind
+    -- another one (run_mode "each") must not replace the output of the run in progress with an empty terminal.
     nio.run(function()
       while true do
         local data = stream()
@@ -76,8 +69,24 @@ function M.install(height)
           break
         end
         vim.schedule(function()
-          if channel then
-            pcall(vim.api.nvim_chan_send, channel, data)
+          if not channel then
+            local buf = vim.api.nvim_create_buf(false, true)
+            channel = vim.api.nvim_open_term(buf, {})
+            if live and vim.api.nvim_win_is_valid(live.win) then
+              vim.api.nvim_win_set_buf(live.win, buf) -- a new run replaces the previous output
+              live.buf = buf
+            else
+              live = { buf = buf, win = open_split(buf, height) }
+            end
+          end
+          pcall(vim.api.nvim_chan_send, channel, data)
+        end)
+      end
+      active = active - 1
+      if auto_close and active == 0 then
+        vim.schedule(function()
+          if active == 0 and live and vim.api.nvim_win_is_valid(live.win) then
+            pcall(vim.api.nvim_win_close, live.win, true)
           end
         end)
       end

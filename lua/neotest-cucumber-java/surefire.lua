@@ -62,13 +62,18 @@ function M.parse(xml)
   return by_name, unnamed
 end
 
+---Glob matching the report files of the runner class.
+function M.glob(root, runner, report_dir)
+  return root .. "/" .. report_dir .. "/TEST-*" .. runner .. ".xml"
+end
+
 ---Report files of the runner class.
 ---@param root string project root
 ---@param runner string runner class name
 ---@param report_dir string relative report directory
 ---@return string[]
 function M.files(root, runner, report_dir)
-  return vim.fn.glob(root .. "/" .. report_dir .. "/TEST-*" .. runner .. ".xml", false, true)
+  return vim.fn.glob(M.glob(root, runner, report_dir), false, true)
 end
 
 ---Delete previous reports, so that a build failure cannot be mistaken for the previous run's results.
@@ -78,9 +83,9 @@ function M.clear(root, runner, report_dir)
   end
 end
 
----Read and parse the report of the runner, or nil when it does not exist.
-function M.read(root, runner, report_dir)
-  local file = M.files(root, runner, report_dir)[1]
+---Read and parse the report of the runner (or the given `file`), or nil when it does not exist.
+function M.read(root, runner, report_dir, file)
+  file = file or M.files(root, runner, report_dir)[1]
   local handle = file and io.open(file, "r")
   if not handle then
     return nil

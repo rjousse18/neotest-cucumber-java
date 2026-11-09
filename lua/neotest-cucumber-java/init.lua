@@ -115,18 +115,6 @@ local function find_runner(root)
   return found or nil
 end
 
----Names of every test under `tree`, as Cucumber knows them.
-local function scenario_names(tree)
-  local names = {}
-  for _, node in tree:iter_nodes() do
-    local data = node:data()
-    if data.type == "test" then
-      names[#names + 1] = data.full or data.name
-    end
-  end
-  return names
-end
-
 function M.build_spec(args)
   local opts = config.options
   local tree = args.tree
@@ -139,44 +127,81 @@ function M.build_spec(args)
   end
 
   local mvn = opts.command or (vim.fn.filereadable(root .. "/mvnw") == 1 and (root .. "/mvnw") or "mvn")
-  local command = { mvn, "test", "-Dtest=" .. runner }
-  vim.list_extend(command, opts.maven_args)
-
-  local files = {}
+  local files, tests = {}, {}
   for _, node in tree:iter_nodes() do
     local d = node:data()
     if d.type == "file" then
       files[#files + 1] = d.path
+    elseif d.type == "test" then
+      tests[#tests + 1] = d
     end
   end
-  -- Selecting a file or below: restrict the run to those scenarios by name (regex, quoted with \Q…\E).
-  -- Selecting a directory runs everything.
-  if data.type ~= "dir" then
-    if #files == 0 then
-      files[1] = data.path
-    end
-    local quoted = {}
-    for _, name in ipairs(scenario_names(tree)) do
-      quoted[#quoted + 1] = "\\Q" .. name .. "\\E"
-    end
-    if #quoted > 0 then
-      command[#command + 1] = "-Dcucumber.filter.name=^(?:" .. table.concat(quoted, "|") .. ")$"
-    end
+  if #files == 0 and data.type ~= "dir" then
+    files[1] = data.path
   end
 
   local debugging = args.strategy == "dap"
-  if debugging then
-    command[#command + 1] = debug.maven_arg(opts.debug.port)
+  local function relative(path)
+    return path:sub(1, #root + 1) == root .. "/" and path:sub(#root + 2) or path
   end
 
-  surefire.clear(root, runner, opts.report_dir)
-  local logfile = vim.fn.tempname()
-  local spec = {
-    command = stream.wrap_command(command, logfile),
-    cwd = root,
-    stream = stream.tail(files, logfile),
-    context = { root = root, runner = runner, pos_id = data.id, logfile = logfile, debug = debugging },
-  }
+  ---@param selection table[] test positions run by this Maven invocation
+  local function make_spec(selection, shared)
+    local command = { mvn, "test", "-Dtest=" .. runner }
+    vim.list_extend(command, opts.maven_args)
+    if data.type ~= "dir" then
+      -- Select by file:line rather than by name: rows of an outline whose title has no placeholder share one name.
+      local selectors = {}
+      for _, test in ipairs(selection) do
+        selectors[#selectors + 1] = relative(test.path) .. ":" .. (test.range[1] + 1)
+      end
+      if #selectors > 0 then
+        -- Without this, Cucumber's own engine runs the features directly, bypassing the suite's
+        -- configuration (glue, Spring/Kafka setup…); through the suite engine it is honoured.
+        command[#command + 1] = "-Dsurefire.includeJUnit5Engines=junit-platform-suite"
+        command[#command + 1] = "-Dcucumber.features=" .. table.concat(selectors, ",")
+      end
+    end
+    if debugging then
+      command[#command + 1] = debug.maven_arg(opts.debug.port)
+    end
+
+    local logfile = vim.fn.tempname()
+    local report = logfile .. ".xml"
+    return {
+      command = stream.wrap_command(command, logfile, {
+        lock = vim.fn.stdpath("cache") .. "/neotest-cucumber-java-" .. vim.fn.sha256(root):sub(1, 12) .. ".lock",
+        report_glob = surefire.glob(root, runner, opts.report_dir),
+        report = report,
+      }),
+      cwd = root,
+      stream = stream.tail(files, logfile),
+      context = {
+        root = root,
+        runner = runner,
+        pos_id = #selection == 1 and selection[1].id or data.id,
+        logfile = logfile,
+        files = files,
+        report = report,
+        debug = debugging,
+        single = #selection == 1 and selection[1].id or nil,
+        shared = shared,
+      },
+    }
+  end
+
+  -- run_mode "each": one Maven run per scenario / example, one after the other (serialised by a lock
+  -- shared by all the runs, since neotest starts them concurrently). Not when debugging.
+  local spec
+  local sequential = opts.run_mode ~= "all" and not debugging and data.type ~= "dir" and #tests > 1
+  if sequential then
+    local specs, shared = {}, {}
+    for _, test in ipairs(tests) do
+      specs[#specs + 1] = make_spec({ test }, shared)
+    end
+    return specs
+  end
+  spec = make_spec(tests, {})
 
   if debugging then
     -- neotest does not run `command` with the dap strategy: start Maven ourselves, then attach to the JVM.
@@ -187,11 +212,11 @@ function M.build_spec(args)
       return nil
     end
     vim.notify("neotest-cucumber-java: waiting for Maven to start the JVM (port " .. opts.debug.port .. ")…")
-    local state = debug.wait_for_jvm(logfile, opts.debug.port, opts.debug.timeout)
+    local state = debug.wait_for_jvm(spec.context.logfile, opts.debug.port, opts.debug.timeout)
     if state ~= "listening" then
       pcall(vim.fn.jobstop, job)
       vim.notify(
-        "neotest-cucumber-java: the JVM never waited for a debugger (" .. state .. "); see " .. logfile,
+        "neotest-cucumber-java: the JVM never waited for a debugger (" .. state .. "); see " .. spec.context.logfile,
         vim.log.levels.ERROR
       )
       return nil
@@ -210,7 +235,7 @@ function M.results(spec, result, tree)
     -- the debug session ends with the JVM; Maven still has to write the report
     debug.wait_for_end(ctx.logfile, 30000)
   end
-  local report, unnamed = surefire.read(ctx.root, ctx.runner, config.options.report_dir)
+  local report, unnamed = surefire.read(ctx.root, ctx.runner, config.options.report_dir, ctx.report)
   if not report then
     results[ctx.pos_id] = {
       status = "failed",
@@ -220,32 +245,53 @@ function M.results(spec, result, tree)
     return results
   end
 
+  local outputs = stream.split_output(ctx.logfile, spec.context.files)
+
   -- 1. leaf results, matched on the full Cucumber name
   local by_id = {}
-  for _, node in tree:iter_nodes() do
-    local data = node:data()
-    local key = data.full or data.name
-    local found = data.type == "test" and report[key]
-    local parent = node:parent() and node:parent():data()
-    if data.type == "test" and not found and parent and (parent.full or parent.name) == key then
-      -- outline rows without a name suffix are matched in order
-      found = table.remove(unnamed, 1)
+  local function record(id, found)
+    by_id[id] = {
+      status = found.status,
+      short = found.message and vim.split(found.message, "\n")[1] or nil,
+      output = outputs[id] or result.output,
+      errors = found.message and { { message = found.message } } or nil,
+    }
+  end
+  if ctx.single then
+    -- a run limited to one position: its only report entry is the result, whatever its name
+    local _, only = next(report)
+    only = only or unnamed[1]
+    if only then
+      record(ctx.single, only)
     end
-    if found then
-      by_id[data.id] = {
-        status = found.status,
-        short = found.message and vim.split(found.message, "\n")[1] or nil,
-        output = result.output,
-        errors = found.message and { { message = found.message } } or nil,
-      }
+  else
+    for _, node in tree:iter_nodes() do
+      local data = node:data()
+      local key = data.full or data.name
+      local found = data.type == "test" and report[key]
+      local parent = node:parent() and node:parent():data()
+      if data.type == "test" and not found and parent and (parent.full or parent.name) == key then
+        -- outline rows without a name suffix are matched in order
+        found = table.remove(unnamed, 1)
+      end
+      if found then
+        record(data.id, found)
+      end
     end
+  end
+
+  -- runs of the same selection (run_mode "each") share their leaf results, so aggregates cover them all
+  local known = ctx.shared.by_id or {}
+  ctx.shared.by_id = known
+  for id, r in pairs(by_id) do
+    known[id] = r
   end
 
   -- 2. namespaces and file: failed > skipped > passed over the children that ran
   local function aggregate(node)
     local data = node:data()
     if data.type == "test" then
-      return by_id[data.id] and by_id[data.id].status
+      return known[data.id] and known[data.id].status
     end
     local seen, failed, skipped = false, false, false
     for _, child in ipairs(node:children()) do
@@ -291,7 +337,8 @@ setmetatable(M, {
     runner_cache = {}
     if options.live_terminal then
       local height = type(options.live_terminal) == "table" and options.live_terminal.height or 15
-      require("neotest-cucumber-java.terminal").install(height)
+      local auto_close = type(options.live_terminal) == "table" and options.live_terminal.auto_close or false
+      require("neotest-cucumber-java.terminal").install(height, auto_close)
     end
     return M
   end,

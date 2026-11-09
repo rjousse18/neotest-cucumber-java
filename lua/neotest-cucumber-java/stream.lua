@@ -18,10 +18,24 @@ local ANSI = "\27%[[%d;]*m"
 local Tracker = {}
 Tracker.__index = Tracker
 
+---Path of the file holding the output of one scenario; written by `split_output` once the run is over.
+---Live results already point to it, so a late live result can't replace the final one with an output-less result.
+---@param logfile string
+---@param id string position id
+---@return string
+function M.output_path(logfile, id)
+  return logfile .. "." .. vim.fn.sha256(id):sub(1, 16)
+end
+
 ---@param files string[]
+---@param logfile? string
 ---@return neotest-cucumber-java.Tracker
-function M.new_tracker(files)
-  return setmetatable({ files = files, current = nil }, Tracker)
+function M.new_tracker(files, logfile)
+  return setmetatable({ files = files, logfile = logfile, current = nil }, Tracker)
+end
+
+function Tracker:result(id, status)
+  return { status = status, output = self.logfile and M.output_path(self.logfile, id) or nil }
 end
 
 ---Close the current scenario and record its result in `out`.
@@ -29,7 +43,7 @@ end
 function Tracker:finish(out)
   local cur = self.current
   if cur and cur.steps > 0 then
-    out[cur.id] = { status = cur.failed and "failed" or (cur.skipped and "skipped" or "passed") }
+    out[cur.id] = self:result(cur.id, cur.failed and "failed" or (cur.skipped and "skipped" or "passed"))
   end
   self.current = nil
 end
@@ -48,12 +62,13 @@ function Tracker:feed(lines)
       ended = true
       self:finish(out)
     else
-      local relative_path, row = line:match("^%s*Scenario[^:]*:.-#%s*classpath:(%S+):(%d+)%s*$")
+      local relative_path, row = line:match("^%s*Scenario[^:]*:.-#%s*[%w]*:?(%S+):(%d+)%s*$")
       if relative_path then
         self:finish(out)
         for _, path in ipairs(self.files) do
           if path:sub(-#relative_path) == relative_path then
-            self.current = { id = path .. "::" .. row, steps = 0 }
+            -- Cucumber prints 1-based lines, position ids use 0-based ones
+            self.current = { id = path .. "::" .. (tonumber(row) - 1), steps = 0 }
           end
         end
       elseif self.current then
@@ -63,7 +78,7 @@ function Tracker:feed(lines)
           cur.steps = cur.steps + 1
         elseif mark and (vim.startswith(mark, "✘") or mark == "?") then
           cur.steps, cur.failed = cur.steps + 1, true
-          out[cur.id] = { status = "failed" }
+          out[cur.id] = self:result(cur.id, "failed")
         elseif mark and (vim.startswith(mark, "↷") or mark == "-") then
           cur.steps, cur.skipped = cur.steps + 1, true
         end
@@ -71,6 +86,56 @@ function Tracker:feed(lines)
     end
   end
   return out, ended
+end
+
+---Split the Maven log of a run into one file per scenario, so that neotest's output (`O`) of an example
+---shows only that example's steps and stack trace.
+---@param logfile string
+---@param files string[] feature files of the run
+---@return table<string, string> output file path by position id
+function M.split_output(logfile, files)
+  local handle = io.open(logfile, "rb")
+  if not handle then
+    return {}
+  end
+  local text = handle:read("*a") or ""
+  handle:close()
+  local outputs, current, buffer = {}, nil, {}
+  local function flush()
+    if current and #buffer > 0 then
+      local path = M.output_path(logfile, current)
+      local out = io.open(path, "wb")
+      if out then
+        out:write(table.concat(buffer, "\n"), "\n")
+        out:close()
+        outputs[current] = path
+      end
+    end
+    current, buffer = nil, {}
+  end
+  for raw in (text .. "\n"):gmatch("(.-)\n") do
+    local line = raw:gsub("\r", "")
+    local plain = line:gsub(ANSI, "")
+    local relative_path, row = plain:match("^%s*Scenario[^:]*:.-#%s*[%w]*:?(%S+):(%d+)%s*$")
+    if relative_path then
+      flush()
+      for _, path in ipairs(files) do
+        if path:sub(-#relative_path) == relative_path then
+          current = path .. "::" .. (tonumber(row) - 1)
+        end
+      end
+    elseif plain:match("^%[%a+%]") or plain == M.END_MARK then
+      -- Maven's own lines (summary, errors) end the scenario block
+      if current then
+        flush()
+      end
+    end
+    if current then
+      buffer[#buffer + 1] = line
+    end
+  end
+  flush()
+  return outputs
 end
 
 ---Build the `stream` function of a neotest RunSpec.
@@ -83,7 +148,7 @@ end
 function M.tail(files, logfile)
   return function()
     local nio = require("nio")
-    local tracker = M.new_tracker(files)
+    local tracker = M.new_tracker(files, logfile)
     local offset, partial, idle = 0, "", 0
     return function()
       while true do
@@ -116,12 +181,21 @@ end
 
 ---Wrap a command so its output is also written to `logfile`, followed by the end marker.
 ---The exit code of the wrapped command is preserved.
+---With `opts`, the run also takes `lock` (so concurrent runs execute one after the other), deletes the previous
+---reports matching `report_glob` before starting and copies the new one to `report` once done.
 ---@param cmd string[]
 ---@param logfile string
+---@param opts? { lock: string, report_glob: string, report: string }
 ---@return string[]
-function M.wrap_command(cmd, logfile)
-  local script = 'LOG=$1; shift; "$@" 2>&1 | tee "$LOG"; rc=${PIPESTATUS[0]}; echo ' .. M.END_MARK .. ' >> "$LOG"; exit $rc'
-  return vim.list_extend({ "bash", "-c", script, "_", logfile }, cmd)
+function M.wrap_command(cmd, logfile, opts)
+  if not opts then
+    local script = 'LOG=$1; shift; "$@" 2>&1 | tee "$LOG"; rc=${PIPESTATUS[0]}; echo ' .. M.END_MARK .. ' >> "$LOG"; exit $rc'
+    return vim.list_extend({ "bash", "-c", script, "_", logfile }, cmd)
+  end
+  local script = 'LOG=$1; LOCK=$2; GLOB=$3; SAVE=$4; shift 4; exec 9>"$LOCK"; flock 9; rm -f $GLOB; '
+    .. '"$@" 2>&1 | tee "$LOG"; rc=${PIPESTATUS[0]}; for f in $GLOB; do [ -f "$f" ] && cp "$f" "$SAVE"; done; '
+    .. "echo " .. M.END_MARK .. ' >> "$LOG"; exit $rc'
+  return vim.list_extend({ "bash", "-c", script, "_", logfile, opts.lock, opts.report_glob, opts.report }, cmd)
 end
 
 return M

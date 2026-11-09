@@ -14,7 +14,7 @@ describe("stream tracker", function()
     })
     assert.is_nil(next(out)) -- not closed yet
     out = t:feed({ "Scenario Outline: Check 02   # classpath:features/X.feature:18" })
-    assert.are.equal("passed", out[FILE .. "::17"].status)
+    assert.are.equal("passed", out[FILE .. "::16"].status)
   end)
 
   it("reports a failed step immediately", function()
@@ -24,7 +24,7 @@ describe("stream tracker", function()
       "  ✔ Given something",
       "  ✘ Then it works",
     })
-    assert.are.equal("failed", out[FILE .. "::3"].status)
+    assert.are.equal("failed", out[FILE .. "::2"].status)
   end)
 
   it("keeps a scenario with only skipped steps as skipped", function()
@@ -32,7 +32,7 @@ describe("stream tracker", function()
     t:feed({ "Scenario: Plain   # classpath:features/X.feature:3", "  ↷ Given something" })
     local out, ended = t:feed({ stream.END_MARK })
     assert.is_true(ended)
-    assert.are.equal("skipped", out[FILE .. "::3"].status)
+    assert.are.equal("skipped", out[FILE .. "::2"].status)
   end)
 
   it("ignores ANSI colors and unknown features", function()
@@ -43,6 +43,29 @@ describe("stream tracker", function()
     })
     t:feed({ stream.END_MARK })
     assert.is_nil(next(out))
+  end)
+
+  it("also reads headers that point to a file path instead of the classpath", function()
+    local t = stream.new_tracker({ "/p/src/test/resources/features/X.feature" })
+    local out = t:feed({
+      "Scenario Outline: Check   # src/test/resources/features/X.feature:19",
+      "  ✘ Given a thing",
+      "__CUKE_END__",
+    })
+    assert.are.same({ ["/p/src/test/resources/features/X.feature::18"] = { status = "failed" } }, out)
+  end)
+
+  it("splits the log into one output file per scenario", function()
+    local log = vim.fn.tempname()
+    local f = io.open(log, "w")
+    f:write("[INFO] start\nScenario: A   # classpath:features/X.feature:3\n  ✔ one\nScenario: B   # classpath:features/X.feature:5\n  ✘ two\n[ERROR] done\n")
+    f:close()
+    local out = stream.split_output(log, { FILE })
+    local a = table.concat(vim.fn.readfile(out[FILE .. "::2"]), "\n")
+    local b = table.concat(vim.fn.readfile(out[FILE .. "::4"]), "\n")
+    assert.is_truthy(a:find("one", 1, true))
+    assert.is_nil(a:find("two", 1, true))
+    assert.is_nil(b:find("ERROR", 1, true))
   end)
 
   it("wraps a command so that the log ends with the marker", function()
