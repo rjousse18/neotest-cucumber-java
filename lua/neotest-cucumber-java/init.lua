@@ -149,7 +149,7 @@ function M.build_spec(args)
   local function make_spec(selection, shared)
     local command = { mvn, "test", "-Dtest=" .. runner }
     vim.list_extend(command, opts.maven_args)
-    if data.type ~= "dir" then
+    do
       -- Select by file:line rather than by name: rows of an outline whose title has no placeholder share one name.
       local selectors = {}
       for _, test in ipairs(selection) do
@@ -193,7 +193,7 @@ function M.build_spec(args)
   -- run_mode "each": one Maven run per scenario / example, one after the other (serialised by a lock
   -- shared by all the runs, since neotest starts them concurrently). Not when debugging.
   local spec
-  local sequential = opts.run_mode ~= "all" and not debugging and data.type ~= "dir" and #tests > 1
+  local sequential = opts.run_mode ~= "all" and not debugging and #tests > 1
   if sequential then
     local specs, shared = {}, {}
     for _, test in ipairs(tests) do
