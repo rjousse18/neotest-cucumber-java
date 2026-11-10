@@ -87,6 +87,24 @@ end
 
 local runner_cache = {}
 
+---The most significant entry of a report limited to one position (failed > passed > skipped).
+local function pick_only(report, unnamed)
+  local rank = { failed = 3, passed = 2, skipped = 1 }
+  local best
+  local function consider(entry)
+    if entry and (not best or rank[entry.status] > rank[best.status]) then
+      best = entry
+    end
+  end
+  for _, entry in pairs(report or {}) do
+    consider(entry)
+  end
+  for _, entry in ipairs(unnamed or {}) do
+    consider(entry)
+  end
+  return best
+end
+
 ---Name of the Cucumber runner class: the `runner` option, or the first class under `test_dir`
 ---annotated with `@IncludeEngines("cucumber")`.
 ---@param root string
@@ -145,63 +163,66 @@ function M.build_spec(args)
     return path:sub(1, #root + 1) == root .. "/" and path:sub(#root + 2) or path
   end
 
-  ---@param selection table[] test positions run by this Maven invocation
-  local function make_spec(selection, shared)
+  ---@param selection table[] test positions to run
+  ---@return string[] Maven command running them
+  local function maven_command(selection)
     local command = { mvn, "test", "-Dtest=" .. runner }
     vim.list_extend(command, opts.maven_args)
-    do
-      -- Select by file:line rather than by name: rows of an outline whose title has no placeholder share one name.
-      local selectors = {}
-      for _, test in ipairs(selection) do
-        selectors[#selectors + 1] = relative(test.path) .. ":" .. (test.range[1] + 1)
-      end
-      if #selectors > 0 then
-        -- Without this, Cucumber's own engine runs the features directly, bypassing the suite's
-        -- configuration (glue, Spring/Kafka setup…); through the suite engine it is honoured.
-        command[#command + 1] = "-Dsurefire.includeJUnit5Engines=junit-platform-suite"
-        command[#command + 1] = "-Dcucumber.features=" .. table.concat(selectors, ",")
-      end
+    -- Select by file:line rather than by name: rows of an outline whose title has no placeholder share one name.
+    local selectors = {}
+    for _, test in ipairs(selection) do
+      selectors[#selectors + 1] = relative(test.path) .. ":" .. (test.range[1] + 1)
+    end
+    if #selectors > 0 then
+      -- Without this, Cucumber's own engine runs the features directly, bypassing the suite's
+      -- configuration (glue, Spring/Kafka setup…); through the suite engine it is honoured.
+      command[#command + 1] = "-Dsurefire.includeJUnit5Engines=junit-platform-suite"
+      command[#command + 1] = "-Dcucumber.features=" .. table.concat(selectors, ",")
     end
     if debugging then
       command[#command + 1] = debug.maven_arg(opts.debug.port)
     end
-
-    local logfile = vim.fn.tempname()
-    local report = logfile .. ".xml"
-    return {
-      command = stream.wrap_command(command, logfile, {
-        lock = vim.fn.stdpath("cache") .. "/neotest-cucumber-java-" .. vim.fn.sha256(root):sub(1, 12) .. ".lock",
-        report_glob = surefire.glob(root, runner, opts.report_dir),
-        report = report,
-      }),
-      cwd = root,
-      stream = stream.tail(files, logfile),
-      context = {
-        root = root,
-        runner = runner,
-        pos_id = #selection == 1 and selection[1].id or data.id,
-        logfile = logfile,
-        files = files,
-        report = report,
-        debug = debugging,
-        single = #selection == 1 and selection[1].id or nil,
-        shared = shared,
-      },
-    }
+    return command
   end
 
-  -- run_mode "each": one Maven run per scenario / example, one after the other (serialised by a lock
-  -- shared by all the runs, since neotest starts them concurrently). Not when debugging.
-  local spec
-  local sequential = opts.run_mode ~= "all" and not debugging and #tests > 1
-  if sequential then
-    local specs, shared = {}, {}
+  -- run_mode "each": one Maven run per scenario / example, one after the other, inside a single process:
+  -- neotest then reports a namespace / file only once the whole selection is over. Not when debugging.
+  local each = opts.run_mode ~= "all" and not debugging and #tests > 1
+  local logfile = vim.fn.tempname()
+  local report = logfile .. ".xml"
+  local wrap_opts = {
+    lock = vim.fn.stdpath("cache") .. "/neotest-cucumber-java-" .. vim.fn.sha256(root):sub(1, 12) .. ".lock",
+    report_glob = surefire.glob(root, runner, opts.report_dir),
+    report = report,
+  }
+  local command
+  if each then
+    local commands = {}
     for _, test in ipairs(tests) do
-      specs[#specs + 1] = make_spec({ test }, shared)
+      commands[#commands + 1] = maven_command({ test })
     end
-    return specs
+    command = stream.wrap_sequence(commands, logfile, wrap_opts)
+  else
+    command = stream.wrap_command(maven_command(tests), logfile, wrap_opts)
   end
-  spec = make_spec(tests, {})
+
+  local spec = {
+    command = command,
+    cwd = root,
+    stream = stream.tail(files, logfile),
+    context = {
+      root = root,
+      runner = runner,
+      pos_id = #tests == 1 and tests[1].id or data.id,
+      logfile = logfile,
+      files = files,
+      report = report,
+      debug = debugging,
+      single = #tests == 1 and tests[1].id or nil,
+      -- position ids in run order: the report of run `i` is `<report>.<i>.xml`
+      sequence = each and vim.tbl_map(function(t) return t.id end, tests) or nil,
+    },
+  }
 
   if debugging then
     -- neotest does not run `command` with the dap strategy: start Maven ourselves, then attach to the JVM.
@@ -235,19 +256,8 @@ function M.results(spec, result, tree)
     -- the debug session ends with the JVM; Maven still has to write the report
     debug.wait_for_end(ctx.logfile, 30000)
   end
-  local report, unnamed = surefire.read(ctx.root, ctx.runner, config.options.report_dir, ctx.report)
-  if not report then
-    results[ctx.pos_id] = {
-      status = "failed",
-      output = result.output,
-      short = "No Surefire report (build or compilation failure?)",
-    }
-    return results
-  end
+  local outputs = stream.split_output(ctx.logfile, ctx.files)
 
-  local outputs = stream.split_output(ctx.logfile, spec.context.files)
-
-  -- 1. leaf results, matched on the full Cucumber name
   local by_id = {}
   local function record(id, found)
     by_id[id] = {
@@ -257,41 +267,64 @@ function M.results(spec, result, tree)
       errors = found.message and { { message = found.message } } or nil,
     }
   end
-  if ctx.single then
-    -- a run limited to one position: its only report entry is the result, whatever its name
-    local _, only = next(report)
-    only = only or unnamed[1]
-    if only then
-      record(ctx.single, only)
-    end
-  else
-    for _, node in tree:iter_nodes() do
-      local data = node:data()
-      local key = data.full or data.name
-      local found = data.type == "test" and report[key]
-      local parent = node:parent() and node:parent():data()
-      if data.type == "test" and not found and parent and (parent.full or parent.name) == key then
-        -- outline rows without a name suffix are matched in order
-        found = table.remove(unnamed, 1)
-      end
-      if found then
-        record(data.id, found)
-      end
-    end
+  local function missing(id)
+    by_id[id] = {
+      status = "failed",
+      output = outputs[id] or result.output,
+      short = "No Surefire report (build or compilation failure?)",
+    }
   end
 
-  -- runs of the same selection (run_mode "each") share their leaf results, so aggregates cover them all
-  local known = ctx.shared.by_id or {}
-  ctx.shared.by_id = known
-  for id, r in pairs(by_id) do
-    known[id] = r
+  if ctx.sequence then
+    -- one Maven run per position: the only entry of the report of run `i` is the result of position `i`
+    for i, id in ipairs(ctx.sequence) do
+      local report, unnamed = surefire.read(ctx.root, ctx.runner, config.options.report_dir, ctx.report .. "." .. i .. ".xml")
+      local only = report and pick_only(report, unnamed)
+      if only then
+        record(id, only)
+      else
+        missing(id)
+      end
+    end
+  else
+    local report, unnamed = surefire.read(ctx.root, ctx.runner, config.options.report_dir, ctx.report)
+    if not report then
+      results[ctx.pos_id] = {
+        status = "failed",
+        output = result.output,
+        short = "No Surefire report (build or compilation failure?)",
+      }
+      return results
+    end
+    if ctx.single then
+      -- a run limited to one position: its only report entry is the result, whatever its name
+      local only = pick_only(report, unnamed)
+      if only then
+        record(ctx.single, only)
+      end
+    else
+      -- leaf results, matched on the full Cucumber name
+      for _, node in tree:iter_nodes() do
+        local data = node:data()
+        local key = data.full or data.name
+        local found = data.type == "test" and report[key]
+        local parent = node:parent() and node:parent():data()
+        if data.type == "test" and not found and parent and (parent.full or parent.name) == key then
+          -- outline rows without a name suffix are matched in order
+          found = table.remove(unnamed, 1)
+        end
+        if found then
+          record(data.id, found)
+        end
+      end
+    end
   end
 
   -- 2. namespaces and file: failed > skipped > passed over the children that ran
   local function aggregate(node)
     local data = node:data()
     if data.type == "test" then
-      return known[data.id] and known[data.id].status
+      return by_id[data.id] and by_id[data.id].status
     end
     local seen, failed, skipped = false, false, false
     for _, child in ipairs(node:children()) do

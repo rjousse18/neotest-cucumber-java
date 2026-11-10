@@ -72,8 +72,12 @@ function Tracker:feed(lines)
           end
         end
       elseif self.current then
-        local mark = line:match("^%s*(%S+)%s+%a")
+        local mark, rest = line:match("^%s*(%S+)%s+(%a.*)$")
         local cur = self.current
+        -- ASCII marks ("-", "?") also start unrelated log lines (e.g. Spring's condition report): require a step keyword
+        if mark and #mark == 1 and not (rest:match("^Given ") or rest:match("^When ") or rest:match("^Then ") or rest:match("^And ") or rest:match("^But ") or rest:match("^%* ")) then
+          mark = nil
+        end
         if mark and vim.startswith(mark, "✔") then
           cur.steps = cur.steps + 1
         elseif mark and (vim.startswith(mark, "✘") or mark == "?") then
@@ -196,6 +200,32 @@ function M.wrap_command(cmd, logfile, opts)
     .. '"$@" 2>&1 | tee "$LOG"; rc=${PIPESTATUS[0]}; for f in $GLOB; do [ -f "$f" ] && cp "$f" "$SAVE"; done; '
     .. "echo " .. M.END_MARK .. ' >> "$LOG"; exit $rc'
   return vim.list_extend({ "bash", "-c", script, "_", logfile, opts.lock, opts.report_glob, opts.report }, cmd)
+end
+
+---Wrap several commands in ONE process that runs them one after the other.
+---A single process means neotest only sees one verdict, when the whole sequence is over (parents are never
+---reported as passed while commands are still to come). After command `i` the new report is copied to
+---`<report>.<i>.xml`. The exit code is the last non-zero one.
+---@param cmds string[][]
+---@param logfile string
+---@param opts { lock: string, report_glob: string, report: string }
+---@return string[]
+function M.wrap_sequence(cmds, logfile, opts)
+  local body = { "rc=0" }
+  for i, cmd in ipairs(cmds) do
+    local quoted = vim.tbl_map(vim.fn.shellescape, cmd)
+    body[#body + 1] = table.concat(quoted, " ")
+      .. ' || rc=$?; for f in $GLOB; do [ -f "$f" ] && cp "$f" "$SAVE.'
+      .. i
+      .. '.xml"; done; rm -f $GLOB'
+  end
+  body[#body + 1] = "exit $rc"
+  local script = 'LOG=$1; LOCK=$2; GLOB=$3; SAVE=$4; exec 9>"$LOCK"; flock 9; rm -f $GLOB; { '
+    .. table.concat(body, "; ")
+    .. ' ; } 2>&1 | tee "$LOG"; rc=${PIPESTATUS[0]}; echo '
+    .. M.END_MARK
+    .. ' >> "$LOG"; exit $rc'
+  return { "bash", "-c", script, "_", logfile, opts.lock, opts.report_glob, opts.report }
 end
 
 return M

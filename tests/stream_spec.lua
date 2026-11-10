@@ -77,4 +77,20 @@ describe("stream tracker", function()
     assert.truthy(content:find("hello", 1, true))
     assert.truthy(content:find(stream.END_MARK, 1, true))
   end)
+
+  it("runs several commands in one process and saves the report of each", function()
+    local dir = vim.fn.tempname()
+    vim.fn.mkdir(dir, "p")
+    local log = vim.fn.tempname()
+    local cmds = {
+      { "sh", "-c", "echo first > " .. dir .. "/TEST-R.xml" },
+      { "sh", "-c", "echo second > " .. dir .. "/TEST-R.xml; exit 2" },
+    }
+    local cmd = stream.wrap_sequence(cmds, log, { lock = log .. ".lock", report_glob = dir .. "/TEST-*R.xml", report = log .. ".xml" })
+    local result = vim.system(cmd):wait()
+    assert.are.equal(2, result.code)
+    assert.are.same({ "first" }, vim.fn.readfile(log .. ".xml.1.xml"))
+    assert.are.same({ "second" }, vim.fn.readfile(log .. ".xml.2.xml"))
+    assert.truthy(table.concat(vim.fn.readfile(log), "\n"):find(stream.END_MARK, 1, true))
+  end)
 end)
